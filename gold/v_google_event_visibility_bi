@@ -1,0 +1,13 @@
+CREATE OR REPLACE VIEW "v_google_event_visibility_bi" AS 
+SELECT
+  t.id
+, t.event_name
+, t.venue_city
+, t.venue_name
+, COALESCE(m.canonical_genre, 'Other') mapped_genre
+, CAST(ROUND(t.avg_demand_proxy) AS DOUBLE) google_results_avg
+, t.n_requests
+FROM
+  (beatmap_gold.v_ticketmaster_event_with_google_demand t
+LEFT JOIN beatmap_gold.dim_genre_map m ON ((LOWER(trim(BOTH FROM m.source_system)) = 'ticketmaster') AND (LOWER(trim(BOTH FROM m.raw_genre)) = LOWER(trim(BOTH FROM t.event_genre)))))
+WHERE (t.avg_demand_proxy IS NOT NULL)

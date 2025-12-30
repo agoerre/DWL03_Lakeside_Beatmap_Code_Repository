@@ -1,0 +1,13 @@
+CREATE OR REPLACE VIEW "v_ticketmaster_event_with_google_demand" AS 
+SELECT
+  t.id
+, t.name event_name
+, t.venue_city
+, t.event_genre
+, t.event_subgenre
+, t.venue_name
+, d.avg_demand_proxy
+, d.n_requests
+FROM
+  (beatmap_silver.ticketmaster_dedup_v2 t
+LEFT JOIN beatmap_gold.v_google_demand_event d ON (t.name = d.event_name))

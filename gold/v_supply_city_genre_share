@@ -1,0 +1,18 @@
+CREATE OR REPLACE VIEW "v_supply_city_genre_share" AS 
+WITH
+  supply AS (
+   SELECT
+     venue_city
+   , event_genre
+   , COUNT(*) event_count
+   FROM
+     beatmap_silver.ticketmaster_dedup_v2
+   GROUP BY venue_city, event_genre
+) 
+SELECT
+  venue_city
+, event_genre
+, event_count
+, ((event_count * 1E0) / SUM(event_count) OVER (PARTITION BY venue_city)) genre_share_per_city
+FROM
+  supply

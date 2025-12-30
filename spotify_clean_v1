@@ -1,0 +1,13 @@
+CREATE OR REPLACE VIEW "spotify_clean_v1" AS 
+SELECT
+  track_id
+, track_name
+, artist_name
+, genre
+, popularity
+, stream_count
+, danceability
+, energy
+, tempo
+FROM
+  beatmap_silver.spotify_data

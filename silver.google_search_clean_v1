@@ -1,0 +1,9 @@
+CREATE OR REPLACE VIEW "google_search_clean_v1" AS 
+SELECT
+  event
+, query_count
+, total_requests
+, ingest_date
+FROM
+  beatmap_silver.google_search
+WHERE ((total_requests IS NOT NULL) AND (event <> 'Taylor Swift London 2025'))

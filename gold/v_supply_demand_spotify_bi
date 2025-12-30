@@ -1,0 +1,26 @@
+CREATE OR REPLACE VIEW "v_supply_demand_spotify_bi" AS 
+WITH
+  kpis AS (
+   SELECT
+     venue_city
+   , mapped_genre
+   , event_count
+   , CAST(supply_share_city AS DOUBLE) supply_share_city
+   , CAST(spotify_demand_share AS DOUBLE) spotify_demand_share
+   , (CASE WHEN (STDDEV_POP(CAST(supply_share_city AS DOUBLE)) OVER (PARTITION BY venue_city) = 0) THEN 0 ELSE ((CAST(supply_share_city AS DOUBLE) - AVG(CAST(supply_share_city AS DOUBLE)) OVER (PARTITION BY venue_city)) / NULLIF(STDDEV_POP(CAST(supply_share_city AS DOUBLE)) OVER (PARTITION BY venue_city), 0)) END) supply_share_z
+   , (CASE WHEN (STDDEV_POP(CAST(spotify_demand_share AS DOUBLE)) OVER (PARTITION BY venue_city) = 0) THEN 0 ELSE ((CAST(spotify_demand_share AS DOUBLE) - AVG(CAST(spotify_demand_share AS DOUBLE)) OVER (PARTITION BY venue_city)) / NULLIF(STDDEV_POP(CAST(spotify_demand_share AS DOUBLE)) OVER (PARTITION BY venue_city), 0)) END) spotify_share_z
+   FROM
+     beatmap_gold.v_supply_demand_spotify_join
+) 
+SELECT
+  venue_city
+, mapped_genre
+, event_count
+, supply_share_city
+, spotify_demand_share
+, supply_share_z
+, spotify_share_z
+, (spotify_share_z - supply_share_z) gap_z
+FROM
+  kpis
+WHERE ((mapped_genre <> 'Other') AND (event_count >= 3))

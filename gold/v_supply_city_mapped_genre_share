@@ -1,0 +1,27 @@
+CREATE OR REPLACE VIEW "v_supply_city_mapped_genre_share" AS 
+WITH
+  mapped AS (
+   SELECT
+     s.venue_city
+   , COALESCE(m.canonical_genre, 'Other') mapped_genre
+   , s.event_count
+   FROM
+     (beatmap_gold.v_supply_city_genre_share s
+   LEFT JOIN beatmap_gold.dim_genre_map m ON ((m.source_system = 'Ticketmaster') AND (LOWER(trim(BOTH FROM m.raw_genre)) = LOWER(trim(BOTH FROM s.event_genre)))))
+) 
+, agg AS (
+   SELECT
+     venue_city
+   , mapped_genre
+   , SUM(event_count) event_count
+   FROM
+     mapped
+   GROUP BY 1, 2
+) 
+SELECT
+  venue_city
+, mapped_genre
+, event_count
+, ((event_count * 1E0) / SUM(event_count) OVER (PARTITION BY venue_city)) genre_share_per_city
+FROM
+  agg

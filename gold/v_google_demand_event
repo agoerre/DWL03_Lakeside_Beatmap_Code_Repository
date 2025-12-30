@@ -1,0 +1,9 @@
+CREATE OR REPLACE VIEW "v_google_demand_event" AS 
+SELECT
+  event event_name
+, AVG(total_requests) avg_demand_proxy
+, COUNT(*) n_requests
+FROM
+  beatmap_silver.google_search_clean_v1
+WHERE ((event IS NOT NULL) AND (total_requests IS NOT NULL))
+GROUP BY event

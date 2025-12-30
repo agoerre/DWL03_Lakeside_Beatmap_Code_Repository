@@ -1,0 +1,12 @@
+CREATE EXTERNAL TABLE IF NOT EXISTS beatmap_gold.dim_genre_map (
+  source_system   string,
+  raw_genre       string,
+  canonical_genre string
+)
+ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.OpenCSVSerde'
+WITH SERDEPROPERTIES (
+  'separatorChar' = ',',
+  'quoteChar'     = '"'
+)
+LOCATION 's3://bucket-s3-beatmap/gold/dim_genre_map/'
+TBLPROPERTIES ('skip.header.line.count'='1');

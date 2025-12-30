@@ -1,0 +1,10 @@
+CREATE OR REPLACE VIEW "v_supply_demand_spotify_join" AS 
+SELECT
+  s.venue_city
+, s.mapped_genre
+, s.event_count
+, s.genre_share_per_city supply_share_city
+, sp.genre_attention_share spotify_demand_share
+FROM
+  (beatmap_gold.v_supply_city_mapped_genre_share s
+LEFT JOIN beatmap_gold.spotify_genre_attention_share sp ON (s.mapped_genre = sp.genre))

@@ -1,0 +1,30 @@
+CREATE OR REPLACE VIEW "ticketmaster_dedup" AS 
+WITH
+  ranked AS (
+   SELECT
+     id
+   , name
+   , venue_city
+   , venue_name
+   , venue_type
+   , event_genre
+   , event_subgenre
+   , event_start_datetime
+   , event_end_datetime
+   , spotify_link
+   , ROW_NUMBER() OVER (PARTITION BY id ORDER BY event_start_datetime ASC) rn
+   FROM
+     beatmap_silver.ticketmaster
+) 
+SELECT
+  name
+, id
+, event_genre
+, event_subgenre
+, event_start_datetime
+, event_end_datetime
+, venue_name
+, spotify_link
+FROM
+  ranked
+WHERE (rn = 1)

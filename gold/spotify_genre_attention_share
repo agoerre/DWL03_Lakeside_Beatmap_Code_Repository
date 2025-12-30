@@ -1,0 +1,15 @@
+CREATE TABLE beatmap_gold.spotify_genre_attention_share
+WITH (
+    format = 'PARQUET',
+    external_location = 's3://bucket-s3-beatmap/gold/spotify_genre_attention_share/'
+) AS
+SELECT
+    genre,
+    COUNT(*)                              AS n_tracks,
+    SUM(stream_count)                     AS total_streams_genre,
+    SUM(stream_count) * 1.0
+        / SUM(SUM(stream_count)) OVER ()  AS genre_attention_share
+FROM beatmap_silver.spotify_clean_v1
+WHERE stream_count IS NOT NULL
+GROUP BY genre
+ORDER BY genre_attention_share DESC;

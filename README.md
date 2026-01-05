@@ -44,7 +44,8 @@ Short explanation of the folder structure and the purpose of the scripts:
 │   └── ticketmaster_dedup                          # Deduplicates and standardizes Ticketmaster event data
 │
 ├── gold/                                           # Curated analytical layer / data warehouse (gold)
-│   ├── dim_genre_map                               # Dimension table mapping genres across different platforms
+|   ├── genre_map                                   # genre mapping (csv) between Ticketmaster and Spotify data to join on genre
+│   ├── dim_genre_map                               # Dimension table mapping genres across different platforms using genre-map
 │   ├── spotify_genre_attention_share               # Pre-aggregated Spotify genre attention metrics            
 │   ├── v_google_demand_event                       # View exposing Google demand signals at event level
 │   ├── v_google_event_visibility_bi                # BI-ready view for Google event visibility metrics                  

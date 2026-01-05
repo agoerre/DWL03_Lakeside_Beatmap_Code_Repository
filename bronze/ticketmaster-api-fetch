@@ -1,63 +1,100 @@
-# app.py — Ticketmaster raw fetch (GB by env), writes raw JSON to S3
+# app.py — Ticketmaster raw fetch (GB, "today" only), writes paged JSON to S3
 import os, json
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo
 import urllib.parse as up
 import urllib.request as ur
 import boto3
 
 # ----- env -----
-COUNTRY = os.environ.get("COUNTRY", "GB")          # only country, no city
-S3_BUCKET = os.environ["S3_BUCKET"]                # e.g. eventlake-raw
+S3_BUCKET = os.environ["S3_BUCKET"]                   # e.g. eventlake-raw
 SECRET_NAME = os.environ.get("TM_SECRET_NAME", "TM_API_KEY")
-PAGE_SIZE = int(os.environ.get("PAGE_SIZE", "200"))  # first page only for smoke test
+PAGE_SIZE = int(os.environ.get("PAGE_SIZE", "200"))   # API max is 200
+MAX_PAGES = int(os.environ.get("MAX_PAGES", "5"))     # guardrail vs DIS1035
+COUNTRY = "GB"                                        # fixed per request
+CLASSIFICATION = "music"
 
 # ----- clients -----
 secrets = boto3.client("secretsmanager")
 s3 = boto3.client("s3")
 
 BASE_URL = "https://app.ticketmaster.com/discovery/v2/events.json"
+UK_TZ = ZoneInfo("Europe/London")
 
-def _api_key():
+def _api_key() -> str:
     val = secrets.get_secret_value(SecretId=SECRET_NAME)
     return json.loads(val["SecretString"])["key"]
 
-def fetch_events(country_code="US", page=0, size=20):
-    now = datetime.now(timezone.utc)
-    end_of_week = now + timedelta(days=7)
+def _iso_z(dt_utc: datetime) -> str:
+    return dt_utc.replace(tzinfo=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+def _today_bounds_uk() -> tuple[str, str, str]:
+    now_uk = datetime.now(UK_TZ)
+    day_str = now_uk.date().isoformat()
+    start_uk = datetime.combine(now_uk.date(), time(0, 0, 0), tzinfo=UK_TZ)
+    end_uk   = datetime.combine(now_uk.date(), time(23, 59, 59), tzinfo=UK_TZ)
+    return _iso_z(start_uk.astimezone(timezone.utc)), _iso_z(end_uk.astimezone(timezone.utc)), day_str
+
+def _build_url(page: int, size: int, start_iso: str, end_iso: str) -> str:
     params = {
         "apikey": _api_key(),
-        "countryCode": country_code,
-        "classificationName": "music",
+        "countryCode": COUNTRY,
+        "classificationName": CLASSIFICATION,
         "page": page,
         "size": size,
-        "startDateTime": now.strftime("%Y-%m-%dT00:00:00Z"),
-        "endDateTime": end_of_week.strftime("%Y-%m-%dT23:59:59Z"),
+        "startDateTime": start_iso,
+        "endDateTime": end_iso,
         "sort": "date,asc",
     }
-    url = f"{BASE_URL}?{up.urlencode(params, doseq=True, safe=':')}"
+    return f"{BASE_URL}?{up.urlencode(params, doseq=True, safe=':')}"
+
+def _http_get_json(url: str) -> dict:
     with ur.urlopen(url, timeout=20) as resp:
-        body = resp.read()
-    return json.loads(body.decode("utf-8"))
+        return json.loads(resp.read().decode("utf-8"))
 
 def lambda_handler(event, context):
-    # first page only (smoke test)
-    payload = fetch_events(country_code=COUNTRY, page=0, size=PAGE_SIZE)
+    start_iso, end_iso, day_partition = _today_bounds_uk()
 
-    # write raw JSON to S3
-    day = datetime.now(timezone.utc).date().isoformat()
-    key = f"raw/ticketmaster/date={day}/country={COUNTRY}/first_page.json"
-    s3.put_object(
-        Bucket=S3_BUCKET,
-        Key=key,
-        Body=json.dumps(payload, separators=(',', ':')).encode("utf-8"),
-        ContentType="application/json"
-    )
+    total_events = 0
+    pages_fetched = 0
+    last_page = None
 
-    count = len(payload.get("_embedded", {}).get("events", []))
+    for page in range(MAX_PAGES):
+        url = _build_url(page=page, size=PAGE_SIZE, start_iso=start_iso, end_iso=end_iso)
+        payload = _http_get_json(url)
+
+        # updated path: country first, then date
+        key = f"raw/ticketmaster/country={COUNTRY}/date={day_partition}/page={page:03d}.json"
+        s3.put_object(
+            Bucket=S3_BUCKET,
+            Key=key,
+            Body=json.dumps(payload, separators=(',', ':')).encode("utf-8"),
+            ContentType="application/json"
+        )
+
+        pages_fetched += 1
+        events = payload.get("_embedded", {}).get("events", [])
+        total_events += len(events)
+
+        page_info = payload.get("page", {})
+        number = page_info.get("number", page)
+        total_pages = page_info.get("totalPages")
+        last_page = total_pages - 1 if isinstance(total_pages, int) else None
+
+        if last_page is not None and number >= last_page:
+            break
+        if (page + 1) * PAGE_SIZE >= 900:  # avoid DIS1035 error
+            break
+
     return {
         "status": "ok",
         "country": COUNTRY,
-        "events_returned": count,
-        "s3_key": key
+        "classification": CLASSIFICATION,
+        "date_local_uk": day_partition,
+        "startDateTime_utc": start_iso,
+        "endDateTime_utc": end_iso,
+        "events_returned": total_events,
+        "pages_fetched": pages_fetched,
+        "last_page_index": last_page,
+        "s3_prefix": f"raw/ticketmaster/country={COUNTRY}/date={day_partition}/"
     }

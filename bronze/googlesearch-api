@@ -1,0 +1,185 @@
+import os
+import json
+import time
+from datetime import datetime, timezone
+import urllib.parse
+import urllib.request
+
+import boto3
+
+# --- Env vars ---
+S3_BUCKET = os.getenv("S3_BUCKET")  # z.B. eventlake-raw
+S3_PREFIX = os.getenv("S3_PREFIX", "raw/google_search")
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+GOOGLE_CSE_ID = os.getenv("GOOGLE_CSE_ID")  # "cx" Parameter
+
+REQUEST_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "20"))
+
+# Athena-Konfiguration
+ATHENA_DB = os.getenv("ATHENA_DB", "beatmap_silver")
+
+# ticketmaster_dedup-Tabelle (wie bisher)
+ATHENA_TICKETMASTER_TABLE = os.getenv("ATHENA_TABLE", "ticketmaster_dedup")
+
+# NEU: google_search-Tabelle
+ATHENA_GOOGLE_TABLE = os.getenv("ATHENA_GOOGLE_TABLE", "google_search")
+
+# NEU: max. Anzahl Titel pro Lauf
+MAX_TITLES = int(os.getenv("MAX_TITLES", "100"))
+
+ATHENA_OUTPUT = os.getenv("ATHENA_OUTPUT")  # z.B. s3://mein-bucket/athena-output/
+ATHENA_WORKGROUP = os.getenv("ATHENA_WORKGROUP", "primary")
+
+s3 = boto3.client("s3")
+athena = boto3.client("athena")
+
+
+def _google_search(event_title: str) -> dict:
+    if not GOOGLE_API_KEY:
+        raise RuntimeError("Missing env var GOOGLE_API_KEY")
+    if not GOOGLE_CSE_ID:
+        raise RuntimeError("Missing env var GOOGLE_CSE_ID")
+
+    base_url = "https://www.googleapis.com/customsearch/v1"
+    params = {
+        "key": GOOGLE_API_KEY,
+        "cx": GOOGLE_CSE_ID,
+        "q": event_title,
+    }
+    query = urllib.parse.urlencode(params)
+    full_url = f"{base_url}?{query}"
+
+    req = urllib.request.Request(full_url)
+    with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+        data = resp.read()
+    payload = json.loads(data.decode("utf-8"))
+
+    info = payload.get("searchInformation", {})
+    return {
+        "event_title": event_title,
+        "total_results": int(info.get("totalResults", "0")),
+        "search_time": float(info.get("searchTime", 0.0)),
+    }
+
+
+def _build_s3_key(prefix: str) -> str:
+    now = datetime.now(timezone.utc)
+    date_part = now.strftime("%Y-%m-%d")
+    ts_part = now.strftime("%Y%m%dT%H%M%SZ")
+    return f"{prefix}/ingest_date={date_part}/google_search_batch_{ts_part}.json"
+
+
+def _get_unsearched_event_titles_from_athena() -> list[str]:
+    """
+    Holt DISTINCT Namen aus ticketmaster_dedup, die noch NICHT als event
+    in google_search vorkommen, begrenzt auf MAX_TITLES.
+    """
+    if not ATHENA_OUTPUT:
+        raise RuntimeError("Missing env var ATHENA_OUTPUT")
+
+    query = f"""
+        SELECT DISTINCT tm.name
+        FROM {ATHENA_TICKETMASTER_TABLE} AS tm
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM {ATHENA_GOOGLE_TABLE} AS gs
+            WHERE gs.event = tm.name
+        )
+        LIMIT {MAX_TITLES}
+    """
+
+    print("Athena query:\n", query)
+
+    resp = athena.start_query_execution(
+        QueryString=query,
+        QueryExecutionContext={"Database": ATHENA_DB},
+        ResultConfiguration={"OutputLocation": ATHENA_OUTPUT},
+        WorkGroup=ATHENA_WORKGROUP,
+    )
+
+    qid = resp["QueryExecutionId"]
+    print("Athena QueryExecutionId:", qid)
+
+    while True:
+        status = athena.get_query_execution(QueryExecutionId=qid)
+        state = status["QueryExecution"]["Status"]["State"]
+        reason = status["QueryExecution"]["Status"].get("StateChangeReason", "")
+
+        if state in ("SUCCEEDED", "FAILED", "CANCELLED"):
+            print(f"Athena final state: {state}, reason: {reason}")
+            break
+
+        time.sleep(1)
+
+    if state != "SUCCEEDED":
+        raise RuntimeError(f"Athena query failed with state: {state} ({reason})")
+
+    res = athena.get_query_results(QueryExecutionId=qid)
+    rows = res["ResultSet"]["Rows"]
+
+    titles: list[str] = []
+    for row in rows[1:]:  # Header überspringen
+        data = row["Data"]
+        if data and "VarCharValue" in data[0]:
+            name_value = data[0]["VarCharValue"].strip()
+            if name_value:
+                titles.append(name_value)
+
+    print("Got", len(titles), "titles from Athena")
+    return titles
+
+
+def lambda_handler(event, context):
+    if not S3_BUCKET:
+        raise RuntimeError("Missing env var S3_BUCKET")
+
+    # 1) Event-Titel aus Event lesen (falls vorhanden)
+    titles = []
+    if isinstance(event, dict) and "event_titles" in event:
+        titles = event.get("event_titles") or []
+
+    # 2) Wenn keine Titel übergeben wurden -> aus Athena holen (unsearched names)
+    if not titles:
+        titles = _get_unsearched_event_titles_from_athena()
+
+    if not titles:
+        return {
+            "status": "ok",
+            "query_count": 0,
+            "message": "no new events to search (all already in google_search)",
+        }
+
+    results = []
+    for t in titles:
+        t_str = str(t).strip()
+        if not t_str:
+            continue
+        try:
+            res = _google_search(t_str)
+            results.append(res)
+        except Exception as e:
+            results.append({
+                "event_title": t_str,
+                "error": str(e)
+            })
+
+    out = {
+        "source": "google_custom_search",
+        "fetched_at_utc": datetime.now(timezone.utc).isoformat(),
+        "query_count": len(results),
+        "queries": results,
+    }
+
+    key = _build_s3_key(S3_PREFIX)
+    s3.put_object(
+        Bucket=S3_BUCKET,
+        Key=key,
+        Body=json.dumps(out, ensure_ascii=False).encode("utf-8"),
+        ContentType="application/json",
+    )
+
+    return {
+        "status": "ok",
+        "query_count": len(results),
+        "s3_uri": f"s3://{S3_BUCKET}/{key}"
+    }

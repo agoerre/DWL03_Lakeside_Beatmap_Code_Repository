@@ -8,7 +8,7 @@ https://public.tableau.com/app/profile/andreas.goerre/viz/Beatmap_dynamic_v2/Fin
 ---
 
 ## 1. Project Overview
-**Course:** Data Warehouse and Data Lake (DWL03)
+**Course:** Data Warehouse and Data Lake (DWL03)  
 **Institution:** Lucerne University of Applied Sciences and Arts (HSLU)  
 **Semester:** HS2025  
 **Authors:**  

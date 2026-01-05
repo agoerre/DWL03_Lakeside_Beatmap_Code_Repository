@@ -25,6 +25,8 @@ The project is executed using AWS-managed services.
 - Scripts in the `silver` and `gold` layers are executed as SQL statements in AWS Athena to clean, transform, and curate the data.
 - The final analytical views in the gold layer are consumed by Tableau via an Athena connection.
 
+- Note: AWS Glue jobs are used for orchestration and execution but do not contain custom transformation logic. As no project-specific code is implemented within Glue itself, these jobs are not included in this repository.
+
 ---
 
 ## 3. Repository Structure

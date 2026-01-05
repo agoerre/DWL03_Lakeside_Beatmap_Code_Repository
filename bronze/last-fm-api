@@ -1,0 +1,170 @@
+from datetime import datetime, timezone
+import json
+import os
+import time
+import logging
+import urllib.parse
+import urllib.request
+
+import boto3
+
+# --- Configuration via Environment Variables ---
+LASTFM_API_KEY = os.getenv("LASTFM_API_KEY", "")
+COUNTRY_NAME = os.getenv("COUNTRY_NAME", "United Kingdom")
+PAGE_LIMIT = int(os.getenv("PAGE_LIMIT", "25"))
+MAX_PAGES = int(os.getenv("MAX_PAGES", "1"))
+S3_BUCKET = os.getenv("S3_BUCKET", "bucket-s3-last-fm")
+S3_PREFIX = os.getenv("S3_PREFIX", "datalake/raw/lastfm")
+REQUEST_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "60"))
+
+ENRICH_ARTIST_TAGS = os.getenv("ENRICH_ARTIST_TAGS", "false").lower() in {"1", "true", "yes"}
+
+logger = logging.getLogger()
+if not logger.handlers:
+    logging.basicConfig(level=logging.INFO)
+logger.setLevel(logging.INFO)
+
+s3 = boto3.client("s3")
+
+
+def _http_get(url: str, params: dict) -> dict:
+    query = urllib.parse.urlencode(params)
+    full_url = f"{url}?{query}"
+    backoff = 1.0
+    for attempt in range(5):
+        try:
+            req = urllib.request.Request(full_url, headers={"User-Agent": "aws-lambda-lastfm-fetcher/1.0"})
+            with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+                data = resp.read()
+            return json.loads(data.decode("utf-8"))
+        except Exception as e:
+            if attempt == 4:
+                raise
+            logger.warning(f"GET failed (attempt {attempt+1}/5): {e}. Retrying in {backoff:.1f}s")
+            time.sleep(backoff)
+            backoff *= 2
+
+
+def fetch_geo_top_tracks(country: str, api_key: str, page_limit: int = 50, max_pages: int = 20):
+    base_url = "https://ws.audioscrobbler.com/2.0/"
+    page = 1
+    all_tracks = []
+    total_pages_seen = None
+
+    while page <= max_pages:
+        params = {
+            "method": "geo.getTopTracks",
+            "country": country,
+            "api_key": api_key,
+            "format": "json",
+            "limit": page_limit,
+            "page": page,
+        }
+        payload = _http_get(base_url, params)
+
+        if "error" in payload:
+            code = payload.get("error")
+            msg = payload.get("message", "Unknown Last.fm error")
+            raise RuntimeError(f"Last.fm error {code}: {msg}")
+
+        tracks = (payload.get("tracks") or {}).get("track", [])
+        meta = (payload.get("tracks") or {}).get("@attr", {})
+        total_pages = int(meta.get("totalPages", 1)) if meta else 1
+        total_pages_seen = total_pages
+
+        all_tracks.extend(tracks)
+        logger.info(f"Fetched page {page}/{total_pages} with {len(tracks)} tracks (accumulated: {len(all_tracks)}).")
+
+        if page >= total_pages:
+            break
+        page += 1
+
+    return all_tracks, total_pages_seen or 1
+
+
+def fetch_artist_top_tags(artist: str, api_key: str, limit: int = 5):
+    base_url = "https://ws.audioscrobbler.com/2.0/"
+    params = {
+        "method": "artist.getTopTags",
+        "artist": artist,
+        "api_key": api_key,
+        "format": "json",
+    }
+    payload = _http_get(base_url, params)
+    tags = (payload.get("toptags") or {}).get("tag", []) or []
+    try:
+        tags_sorted = sorted(tags, key=lambda t: int(t.get("count", 0)), reverse=True)
+    except Exception:
+        tags_sorted = tags
+    return [t.get("name") for t in tags_sorted[:limit]]
+
+
+def _slugify(text: str) -> str:
+    return (
+        text.lower()
+        .replace(" ", "-")
+        .replace("/", "-")
+        .replace("\\", "-")
+    )
+
+
+def _build_s3_key(prefix: str, country: str) -> str:
+    now = datetime.now(timezone.utc)
+    date_part = now.strftime("%Y-%m-%d")
+    ts_part = now.strftime("%Y%m%dT%H%M%SZ")
+    country_slug = _slugify(country)
+    return f"{prefix}/geo_top_tracks/country={country_slug}/ingest_date={date_part}/lastfm_geo_top_tracks_{ts_part}.json"
+
+
+def handler(event, context):
+    if not LASTFM_API_KEY:
+        raise RuntimeError("Missing env var LASTFM_API_KEY")
+    if not S3_BUCKET:
+        raise RuntimeError("Missing env var S3_BUCKET")
+
+    country = COUNTRY_NAME
+    logger.info(f"Starting fetch for country='{country}', page_limit={PAGE_LIMIT}, max_pages={MAX_PAGES}")
+
+    tracks, total_pages = fetch_geo_top_tracks(country, LASTFM_API_KEY, PAGE_LIMIT, MAX_PAGES)
+
+    if ENRICH_ARTIST_TAGS:
+        seen = {}
+        for t in tracks:
+            artist_name = ((t.get("artist") or {}).get("name") or "").strip()
+            if artist_name and artist_name not in seen:
+                try:
+                    seen[artist_name] = fetch_artist_top_tags(artist_name, LASTFM_API_KEY)
+                    time.sleep(0.2)
+                except Exception as e:
+                    logger.warning(f"Failed to fetch tags for '{artist_name}': {e}")
+        for t in tracks:
+            artist_name = ((t.get("artist") or {}).get("name") or "").strip()
+            if artist_name:
+                t.setdefault("_enrichment", {})["artist_top_tags"] = seen.get(artist_name, [])
+
+    out = {
+        "source": "lastfm",
+        "method": "geo.getTopTracks",
+        "country": country,
+        "fetched_at_utc": datetime.now(timezone.utc).isoformat(),
+        "page_limit": PAGE_LIMIT,
+        "total_pages": total_pages,
+        "records": tracks,
+    }
+
+    key = _build_s3_key(S3_PREFIX, country)
+    s3.put_object(
+        Bucket=S3_BUCKET,
+        Key=key,
+        Body=json.dumps(out, ensure_ascii=False).encode("utf-8"),
+        ContentType="application/json",
+    )
+    logger.info(f"Uploaded {len(tracks)} tracks to s3://{S3_BUCKET}/{key}")
+
+    return {
+        "status": "ok",
+        "country": country,
+        "records": len(tracks),
+        "s3_uri": f"s3://{S3_BUCKET}/{key}",
+        "total_pages": total_pages,
+    }
